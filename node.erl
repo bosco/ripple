@@ -2,6 +2,8 @@
 -export([create/1]).
 -include("ripple.hrl").
 
+count_votes(Knowledge) ->
+	count_votes(Knowledge, {0, 0, 0}).
 count_votes([], Tally) ->
 	Tally;
 count_votes([{_, 0}|Tail], {Undecided, For, Against}) ->
@@ -28,18 +30,17 @@ create(Supervisor) ->
 	Id = crypto:hash(?hash_type, Public_key),
 	Node_info = #node_info{id=Id, pid=Pid, public_key=Public_key},
 	Supervisor ! Node_info,
-	receive_msg([], Node_info, Private_key, []). 
+	receive_msg([], Node_info, Private_key, [], 0). 
 
-receive_msg(Unl, Node_info, Private_key, Knowledge) ->
-	io:format("My knowledge is...~n~p~n", [Knowledge]),
+receive_msg(Unl, Node_info, Private_key, Knowledge, Start_time) ->
 	receive
-		{unl, New_unl} ->
-			New_knowledge = lists:map(fun(Node) -> {Node#node_info.id, 0} end, New_unl);
-		vote ->
+		{start, New_unl} ->
+			%% Right now everyone is voting FOR
+			New_knowledge = [{Node_info#node_info.id, 1} |
+					lists:map(fun(Node) -> {Node#node_info.id, 0} end, New_unl)],
+			New_start_time = erlang:system_time(milli_seconds),
 			Msg = make_signed_message(Node_info#node_info.id, #vote{position=true}, Private_key),
-			lists:foreach(fun(Node) -> Node#node_info.pid ! Msg end, Unl),
-			New_unl = Unl,
-			New_knowledge = Knowledge;
+			lists:foreach(fun(Node) -> Node#node_info.pid ! Msg end, New_unl);
 		#signed_message{id=Id, sig=Sig, msg=Msg} ->
 			Node = lists:keyfind(Id, 2, Unl),
 			Sig_check = verify_sig(Unl, Msg, Sig, Node),
@@ -47,20 +48,31 @@ receive_msg(Unl, Node_info, Private_key, Knowledge) ->
 				Sig_check ->
 					case binary_to_term(Msg) of
 						#vote{position=Position} when Position == true ->
-							New_knowledge = lists:keyreplace(Id, 1, Knowledge, {Id, 1});
+							Updated_knowledge = lists:keyreplace(Id, 1, Knowledge, {Id, 1});
 						#vote{} ->
-							New_knowledge = lists:keyreplace(Id, 1, Knowledge, {Id, -1})
+							Updated_knowledge = lists:keyreplace(Id, 1, Knowledge, {Id, -1})
+					end,
+
+					%% Every 1/4 of a second you need one more vote to change our vote
+					Time = erlang:system_time(milli_seconds),
+					Min_votes = length(Updated_knowledge) / 2,
+					Required = Min_votes + ((Time - Start_time) / 250),
+					Tally = count_votes(Updated_knowledge),
+					io:format("~p Tally: ~p Required: ~p~n", [Node_info#node_info.pid, Tally, Required]),
+					
+					case count_votes(Updated_knowledge) of
+						{Undecided, For, _} when Undecided < Min_votes, For > Required ->
+							io:format("Changing my vote to for.~n", []);
+						{Undecided, _, _} when Undecided < Min_votes ->
+							io:format("Changing my vote to against.~n", []);
+						_ ->
+							io:format("We don't have enough votes to change.~n", [])
 					end;
 				true ->
 					io:format("Invalid signature~n", []),
 					New_knowledge = Knowledge
 			end,
-			New_unl = Unl
+			New_unl = Unl,
+			New_start_time = Start_time
 	end,
-	if
-		New_knowledge /= Knowledge ->
-			io:format("My tally: ~p~n", [count_votes(New_knowledge, {0, 0, 0})]);
-		true ->
-			io:format("Nothing has changed.~n", [])
-	end,
-	receive_msg(New_unl, Node_info, Private_key, New_knowledge).
+	receive_msg(New_unl, Node_info, Private_key, New_knowledge, New_start_time).

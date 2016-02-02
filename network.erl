@@ -14,8 +14,7 @@ start() ->
 	start(10),
 	Nodes = get_nodes_list([], 10),
 	%% Give every node a UNL without themselves in it
-	lists:foreach(fun(Node) -> Node#node_info.pid ! {unl, lists:delete(Node, Nodes)} end, Nodes),
-	lists:foreach(fun(Node) -> Node#node_info.pid ! vote end, Nodes).
+	lists:foreach(fun(Node) -> Node#node_info.pid ! {start, lists:delete(Node, Nodes)} end, Nodes).
 start(0) ->
 	done;
 start(N) ->
